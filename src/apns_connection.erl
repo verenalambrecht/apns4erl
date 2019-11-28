@@ -22,7 +22,8 @@
 -behaviour(gen_statem).
 
 %% API
--export([ start_link/2
+-export([ start_link/1
+        , start_link/2
         , default_connection/2
         , name/1
         , host/1
@@ -103,6 +104,11 @@
 %%%===================================================================
 
 %% @doc starts the gen_statem
+-spec start_link(connection()) ->
+  {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
+start_link(#{name := undefined} = Connection) ->
+  gen_statem:start_link(?MODULE, {Connection, undefined}, []).
+
 -spec start_link(connection(), pid()) ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
 start_link(#{name := undefined} = Connection, Client) ->
@@ -339,7 +345,7 @@ down(internal
        }) ->
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
-  Client ! {reconnecting, self()},
+  % Client ! {reconnecting, self()},
   Sleep = backoff(Backoff, Ceiling) * 1000,
   {keep_state_and_data, {state_timeout, Sleep, backoff}};
 down(state_timeout, backoff, StateData) ->

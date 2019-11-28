@@ -24,6 +24,8 @@
         , stop/0
         , connect/1
         , connect/2
+        , connect_pooled/2
+        , disconnect_pooled/1
         , wait_for_connection_up/1
         , close_connection/1
         , push_notification/3
@@ -61,6 +63,8 @@
                       }.
 -type feedback()  :: apns_feedback:feedback().
 
+-define(POOLS_TABLE, apns_pools).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -69,6 +73,7 @@
 -spec start() -> ok.
 start() ->
   {ok, _} = application:ensure_all_started(apns),
+  ?POOLS_TABLE = ets:new(?POOLS_TABLE, [public, named_table]),
   ok.
 
 %% @doc Stops the Application
@@ -89,6 +94,14 @@ connect(Type, ConnectionName) ->
 connect(Connection) ->
   apns_sup:create_connection(Connection).
 
+-spec connect_pooled(any(), map()) -> {ok, pid()}.
+connect_pooled(Name, #{pool_config := _PoolConfig} = Connection) ->
+  apns_pool:create_pool(Name, Connection).
+
+-spec disconnect_pooled(any()) -> ok.
+disconnect_pooled(Name) ->
+  apns_pool:destroy_pool(Name).
+
 %% @doc Wait for the APNs connection to be up.
 -spec wait_for_connection_up(pid()) -> ok.
 wait_for_connection_up(Server) ->
@@ -101,7 +114,7 @@ close_connection(ConnectionId) ->
 
 %% @doc Push notification to APNs. It will use the headers provided on the
 %%      environment variables.
--spec push_notification( apns_connection:name() | pid()
+-spec push_notification( apns_connection:name() | pid() | binary()
                        , device_id()
                        , json()
                        ) -> response() | {error, not_connection_owner}.
@@ -110,11 +123,20 @@ push_notification(ConnectionId, DeviceId, JSONMap) ->
   push_notification(ConnectionId, DeviceId, JSONMap, Headers).
 
 %% @doc Push notification to certificate APNs Connection.
--spec push_notification( apns_connection:name() | pid()
+-spec push_notification( apns_connection:name() | pid() | binary()
                        , device_id()
                        , json()
                        , headers()
                        ) -> response() | {error, not_connection_owner}.
+push_notification(ConnectionId, DeviceId, JSONMap, Headers) when is_binary(ConnectionId) ->
+  apns_pool:transaction(ConnectionId, fun(Worker) ->
+    push_notification(Worker
+                    , DeviceId
+                    , JSONMap
+                    , Headers
+                    )
+  end);
+
 push_notification(ConnectionId, DeviceId, JSONMap, Headers) ->
   Notification = jsx:encode(JSONMap),
   apns_connection:push_notification( ConnectionId

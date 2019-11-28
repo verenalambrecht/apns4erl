@@ -8,6 +8,8 @@
     kernel,
     stdlib,
     jsx,
+    fuse,
+    poolboy,
     gun,
     base64url
   ]},

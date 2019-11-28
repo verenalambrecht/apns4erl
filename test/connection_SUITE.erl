@@ -10,6 +10,7 @@
         , certdata_keydata_connection/1
         , connect/1
         , connect_without_name/1
+        , connect_pooled/1
         , gun_connection_lost/1
         , gun_connection_lost_timeout/1
         , gun_connection_killed/1
@@ -32,6 +33,7 @@ all() ->  [ default_connection
           , certdata_keydata_connection
           , connect
           , connect_without_name
+          , connect_pooled
           , gun_connection_lost
           , gun_connection_lost_timeout
           , gun_connection_killed
@@ -46,6 +48,8 @@ all() ->  [ default_connection
 -spec init_per_suite(config()) -> config().
 init_per_suite(Config) ->
   ok = apns:start(),
+  {ok, _} = application:ensure_all_started(poolboy),
+  {ok, _} = application:ensure_all_started(gproc),
   Config.
 
 -spec end_per_suite(config()) -> config().
@@ -121,6 +125,29 @@ connect_without_name(_Config) ->
   ok = close_connection(ServerPid),
   [_] = meck:unload(),
   ok.
+
+-spec connect_pooled(config()) -> ok.
+connect_pooled(_Config) ->
+  ok = mock_gun_open(),
+  PoolSize = 3,
+  Connection = #{
+      pool_config => #{
+          size => PoolSize
+      },
+      name => undefined,
+      apple_host => <<"apple-host">>,
+      apple_port => <<"apple-port">>,
+      keydata => <<"keydata">>,
+      certdata => <<"certdata">>,
+      timeout => 5000,
+      type => certdata,
+      proxy_info =>
+        #{type => connect, host => <<"proxy-host">>, port => <<"proxy-port">>}
+  },
+  PoolName = <<"pooled-apns-connection">>,
+  {ok, PoolPid} = apns:connect_pooled(PoolName, Connection),
+  {ready, PoolSize, _, _} = poolboy:status(PoolPid),
+  PoolPid = gproc:where({n, l, {apns_connection, PoolName}}).
 
 -spec gun_connection_lost(config()) -> ok.
 gun_connection_lost(_Config) ->
