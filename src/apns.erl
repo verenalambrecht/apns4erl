@@ -79,6 +79,7 @@ start() ->
 %% @doc Stops the Application
 -spec stop() -> ok.
 stop() ->
+  ets:delete(?POOLS_TABLE),
   ok = application:stop(apns),
   ok.
 
@@ -94,13 +95,15 @@ connect(Type, ConnectionName) ->
 connect(Connection) ->
   apns_sup:create_connection(Connection).
 
--spec connect_pooled(any(), map()) -> {ok, pid()}.
+-spec connect_pooled(binary(), map()) -> {ok, pid()}.
 connect_pooled(Name, #{pool_config := _PoolConfig} = Connection) ->
+  ets:insert_new(?POOLS_TABLE, {Name, 0, Connection}),
   apns_pool:create_pool(Name, Connection).
 
--spec disconnect_pooled(any()) -> ok.
+-spec disconnect_pooled(binary()) -> ok.
 disconnect_pooled(Name) ->
-  apns_pool:destroy_pool(Name).
+  apns_pool:destroy_pool(Name),
+  ets:delete(?POOLS_TABLE, Name).
 
 %% @doc Wait for the APNs connection to be up.
 -spec wait_for_connection_up(pid()) -> ok.

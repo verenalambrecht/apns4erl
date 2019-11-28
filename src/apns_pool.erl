@@ -9,20 +9,23 @@
 -type pool_name() :: {via, gproc, {n, l, {apns_connection, binary()}}}.
 
 -spec create_pool(any(), map()) -> pid().
-create_pool(Name, Connection) ->
+create_pool(Name, Connection0) ->
   #{
     pool_config := #{
       size := Size
     }
-  } = Connection,
+  } = Connection0,
+
+  Connection = Connection0#{ fuse => fuse_name(Name)},
+
+  create_fuse(Name, Connection),
 
   PoolArgs = [
       {name, pool_name(Name)},
       {worker_module, apns_connection},
       {size, Size}
   ],
-  WorkerArgs = Connection,
-  poolboy:start_link(PoolArgs, WorkerArgs).
+  poolboy:start_link(PoolArgs, Connection).
 
 destroy_pool(Name) ->
   case find_pool(Name) of
@@ -30,19 +33,37 @@ destroy_pool(Name) ->
     Pid -> poolboy:stop(Pid)
   end.
 
--spec transaction(any(), fun((pid()) -> any())) -> {error, pool_not_found} | any().
+-spec transaction(binary(), fun((pid()) -> any())) ->
+    {error, unknown_pool} | {error, not_connected} |any().
 transaction(Name, Fun) ->
-  try
-      poolboy:transaction(find_pool(Name), Fun)
-  catch
-      exit:{noproc, _} ->
-          {error, pool_not_found}
+  case fuse:ask(fuse_name(Name), sync) of
+    ok ->
+      poolboy:transaction(find_pool(Name), Fun);
+
+    blown ->
+      {error, not_connected};
+
+    {error, not_found} ->
+      {error, unknown_pool}
   end.
 
--spec find_pool(any()) -> pid().
+-spec find_pool(binary()) -> pid().
 find_pool(Name) ->
   gproc:where({n, l, {apns_connection, Name}}).
 
 -spec pool_name(binary()) -> pool_name().
 pool_name(Name) ->
   {via, gproc, {n, l, {apns_connection, Name}}}.
+
+-spec create_fuse(binary(), map()) -> ok.
+create_fuse(Name, Opts) ->
+  Strategy = maps:get(fuse_strategy, Opts, {standard, 10, 60000}),
+  Refresh = maps:get(fuse_refresh, Opts, {reset, 60000}),
+  FuseOpts = {Strategy, Refresh},
+  fuse:install(fuse_name(Name), FuseOpts),
+  ok.
+
+-spec fuse_name(binary()) -> atom().
+fuse_name(PoolName) ->
+  % TODO: avoid to generate atoms
+  binary_to_atom(PoolName, utf8).
