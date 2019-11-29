@@ -33,7 +33,8 @@
 
 -spec start(term(), term()) -> {error, term()} | {ok, pid()}.
 start(_StartType, _StartArgs) ->
-  apns_sup:start_link().
+  apns_sup:start_link(),
+  apns_pools_sup:start_link().
 
 -spec stop(term()) -> ok.
 stop(_State) ->

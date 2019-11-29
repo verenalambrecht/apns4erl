@@ -63,8 +63,6 @@
                       }.
 -type feedback()  :: apns_feedback:feedback().
 
--define(POOLS_TABLE, apns_pools).
-
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -73,13 +71,11 @@
 -spec start() -> ok.
 start() ->
   {ok, _} = application:ensure_all_started(apns),
-  ?POOLS_TABLE = ets:new(?POOLS_TABLE, [public, named_table]),
   ok.
 
 %% @doc Stops the Application
 -spec stop() -> ok.
 stop() ->
-  ets:delete(?POOLS_TABLE),
   ok = application:stop(apns),
   ok.
 
@@ -96,14 +92,12 @@ connect(Connection) ->
   apns_sup:create_connection(Connection).
 
 -spec connect_pooled(binary(), map()) -> {ok, pid()}.
-connect_pooled(Name, #{pool_config := _PoolConfig} = Connection) ->
-  ets:insert_new(?POOLS_TABLE, {Name, 0, Connection}),
-  apns_pool:create_pool(Name, Connection).
+connect_pooled(Name, Connection) ->
+  apns_pools_sup:start_child(Name, Connection).
 
 -spec disconnect_pooled(binary()) -> ok.
 disconnect_pooled(Name) ->
-  apns_pool:destroy_pool(Name),
-  ets:delete(?POOLS_TABLE, Name).
+  apns_pools_sup:stop_child(Name).
 
 %% @doc Wait for the APNs connection to be up.
 -spec wait_for_connection_up(pid()) -> ok.
@@ -132,7 +126,7 @@ push_notification(ConnectionId, DeviceId, JSONMap) ->
                        , headers()
                        ) -> response() | {error, not_connection_owner}.
 push_notification(ConnectionId, DeviceId, JSONMap, Headers) when is_binary(ConnectionId) ->
-  apns_pool:transaction(ConnectionId, fun(Worker) ->
+  apns_pools_sup:transaction(ConnectionId, fun(Worker) ->
     push_notification(Worker
                     , DeviceId
                     , JSONMap

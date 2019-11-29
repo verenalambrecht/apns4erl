@@ -78,7 +78,8 @@
                          , username   => iodata()
                          , password   => iodata()
                          }.
--type connection()   :: #{ name       := name()
+-type connection()   :: #{ pool_id    => any()
+                         , name       := name()
                          , apple_host := host()
                          , apple_port := inet:port_number()
                          , certdata   => binary()
@@ -106,7 +107,10 @@
 %% @doc starts the gen_statem
 -spec start_link(connection()) ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
-start_link(#{name := undefined} = Connection) ->
+start_link(#{name := Name} = Connection) ->
+  Name = name(Connection),
+  gen_statem:start_link({local, Name}, ?MODULE, {Connection, undefined}, []);
+start_link(Connection) ->
   gen_statem:start_link(?MODULE, {Connection, undefined}, []).
 
 -spec start_link(connection(), pid()) ->
@@ -307,6 +311,8 @@ await_tunnel_up(EventType, EventContent, StateData) ->
   handle_common(EventType, EventContent, ?FUNCTION_NAME, StateData, postpone).
 
 -spec connected(_, _, _) -> _.
+connected(internal, on_connect, #{client := undefined}) ->
+  keep_state_and_data;
 connected(internal, on_connect, #{client := Client}) ->
   Client ! {connection_up, self()},
   keep_state_and_data;
@@ -345,7 +351,10 @@ down(internal
        }) ->
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
-  % Client ! {reconnecting, self()},
+  case Client of
+    undefined -> ok;
+    _ -> Client ! {reconnecting, self()}
+  end,
   Sleep = backoff(Backoff, Ceiling) * 1000,
   {keep_state_and_data, {state_timeout, Sleep, backoff}};
 down(state_timeout, backoff, StateData) ->
@@ -393,7 +402,9 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 
 -spec name(connection()) -> name().
 name(#{name := ConnectionName}) ->
-  ConnectionName.
+  ConnectionName;
+name(_) ->
+  undefined.
 
 -spec host(connection()) -> host().
 host(#{apple_host := Host}) ->
