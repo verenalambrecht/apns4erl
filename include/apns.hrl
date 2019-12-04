@@ -1,0 +1,2 @@
+-define(MNOW, erlang:monotonic_time()).
+-define(MDURATION(Start), ?MNOW - Start).

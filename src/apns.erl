@@ -24,8 +24,6 @@
         , stop/0
         , connect/1
         , connect/2
-        , connect_pooled/2
-        , disconnect_pooled/1
         , wait_for_connection_up/1
         , close_connection/1
         , push_notification/3
@@ -37,6 +35,8 @@
         , generate_token/3
         , get_feedback/0
         , get_feedback/1
+        , fuse_melt/1
+        , fuse_reset/1
         ]).
 
 -export_type([ json/0
@@ -62,6 +62,10 @@
                       , apns_auth_token  => binary()
                       }.
 -type feedback()  :: apns_feedback:feedback().
+
+-define(POOLS_TABLE, apns_pools).
+
+-include("apns.hrl").
 
 %%%===================================================================
 %%% API
@@ -89,15 +93,30 @@ connect(Type, ConnectionName) ->
 %% @doc Connects to APNs service
 -spec connect(apns_connection:connection()) -> {ok, pid()}.
 connect(Connection) ->
-  apns_sup:create_connection(Connection).
+  Name = maps:get(name, Connection, undefined),
+  Pool = maps:get(pool, Connection, undefined),
+  Fuse = maps:get(fuse, Connection, {
+                                      {standard, 5, 60000},
+                                      {reset, 60000}
+                                    }),
 
--spec connect_pooled(binary(), map()) -> {ok, pid()}.
-connect_pooled(Name, Connection) ->
-  apns_pools_sup:start_child(Name, Connection).
 
--spec disconnect_pooled(binary()) -> ok.
-disconnect_pooled(Name) ->
-  apns_pools_sup:stop_child(Name).
+  case Name of
+    undefined ->
+      % nameless connection
+      apns_sup:create_connection(Connection#{ fuse => undefined });
+
+    Name ->
+      fuse_create(Name, Fuse),
+
+      case Pool of
+        undefined ->
+          apns_sup:create_connection(Connection#{ fuse => Name });
+
+        Pool ->
+          apns_pools:start_pool(Name, Connection#{ name => undefined, fuse => Name })
+      end
+  end.
 
 %% @doc Wait for the APNs connection to be up.
 -spec wait_for_connection_up(pid()) -> ok.
@@ -106,8 +125,34 @@ wait_for_connection_up(Server) ->
 
 %% @doc Closes the connection with APNs service.
 -spec close_connection(apns_connection:name() | pid()) -> ok.
+close_connection(ConnectionId) when is_pid(ConnectionId) ->
+  apns_connection:close_connection(ConnectionId);
+
 close_connection(ConnectionId) ->
-  apns_connection:close_connection(ConnectionId).
+  fuse_remove(ConnectionId),
+  case apns_pools:find_pool(ConnectionId) of
+    {ok, _} ->
+      apns_pools:stop_pool(ConnectionId);
+
+    {error, not_found} ->
+      apns_connection:close_connection(ConnectionId)
+  end.
+
+-spec fuse_create(atom(), any()) -> ok.
+fuse_create(Name, Config) ->
+  fuse:install(Name, Config).
+
+-spec fuse_remove(atom()) -> ok.
+fuse_remove(Name) ->
+  fuse:remove(Name).
+
+-spec fuse_melt(atom()) -> ok.
+fuse_melt(Name) ->
+  fuse:melt(Name).
+
+-spec fuse_reset(atom()) -> ok.
+fuse_reset(Name) ->
+  fuse:reset(Name).
 
 %% @doc Push notification to APNs. It will use the headers provided on the
 %%      environment variables.
@@ -125,22 +170,24 @@ push_notification(ConnectionId, DeviceId, JSONMap) ->
                        , json()
                        , headers()
                        ) -> response() | {error, not_connection_owner}.
-push_notification(ConnectionId, DeviceId, JSONMap, Headers) when is_binary(ConnectionId) ->
-  apns_pools_sup:transaction(ConnectionId, fun(Worker) ->
-    push_notification(Worker
-                    , DeviceId
-                    , JSONMap
-                    , Headers
-                    )
-  end);
-
 push_notification(ConnectionId, DeviceId, JSONMap, Headers) ->
   Notification = jsx:encode(JSONMap),
-  apns_connection:push_notification( ConnectionId
-                                   , DeviceId
-                                   , Notification
-                                   , Headers
-                                   ).
+
+  case apns_pools:find_pool(ConnectionId) of
+    {ok, _} ->
+        apns_pools:push_notification( ConnectionId
+                                    , DeviceId
+                                    , Notification
+                                    , Headers
+                                    );
+
+    {error, not_found} ->
+      apns_connection:push_notification(ConnectionId
+                                      , DeviceId
+                                      , Notification
+                                      , Headers
+                                      )
+  end.
 
 %% @doc Push notification to APNs with authentication token. It will use the
 %%      headers provided on the environment variables.
@@ -162,12 +209,42 @@ push_notification_token(ConnectionId, Token, DeviceId, JSONMap) ->
                              ) -> response() | {error, not_connection_owner}.
 push_notification_token(ConnectionId, Token, DeviceId, JSONMap, Headers) ->
   Notification = jsx:encode(JSONMap),
-  apns_connection:push_notification( ConnectionId
-                                   , Token
-                                   , DeviceId
-                                   , Notification
-                                   , Headers
-                                   ).
+
+  case apns_pools:find_pool(ConnectionId) of
+    {ok, _} ->
+      apns_pools:push_notification( ConnectionId
+                                  , Token
+                                  , DeviceId
+                                  , Notification
+                                  , Headers
+                                  );
+    {error, not_found} ->
+      apns_connection:push_notification( ConnectionId
+                                      , Token
+                                      , DeviceId
+                                      , Notification
+                                      , Headers
+                                      )
+  end.
+
+
+
+push_() ->
+  case fuse:ask(Name, sync) of
+    ok ->
+      do_push();
+
+    blown ->
+      {error, not_connected};
+
+    {error, not_found} ->
+      {error, unknown_pool}
+  end.
+
+
+
+
+
 -spec generate_token(binary(), binary()) -> token().
 generate_token(TeamId, KeyId) ->
   {ok, KeyPath} = application:get_env(apns, token_keyfile),

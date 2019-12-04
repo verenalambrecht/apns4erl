@@ -72,14 +72,14 @@
 -type keydata()      :: {'RSAPrivateKey' | 'DSAPrivateKey' | 'ECPrivateKey' |
                          'PrivateKeyInfo'
                         , binary()}.
+-type fuse()         :: atom().
 -type proxy_info()   :: #{ type       := connect
                          , host       := host()
                          , port       := inet:port_number()
                          , username   => iodata()
                          , password   => iodata()
                          }.
--type connection()   :: #{ pool_id    => any()
-                         , name       := name()
+-type connection()   :: #{ name       := name()
                          , apple_host := host()
                          , apple_port := inet:port_number()
                          , certdata   => binary()
@@ -89,6 +89,8 @@
                          , timeout    => integer()
                          , type       := type()
                          , proxy_info => proxy_info()
+                         , fuse       => fuse()
+                         , start      => integer()
                          }.
 
 -type state()        :: #{ connection      := connection()
@@ -105,13 +107,13 @@
 %%%===================================================================
 
 %% @doc starts the gen_statem
--spec start_link(connection()) ->
+-spec start_link({connection(), pid()}) ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
-start_link(#{name := Name} = Connection) ->
+start_link({#{name := Name} = Connection, Client}) ->
   Name = name(Connection),
-  gen_statem:start_link({local, Name}, ?MODULE, {Connection, undefined}, []);
-start_link(Connection) ->
-  gen_statem:start_link(?MODULE, {Connection, undefined}, []).
+  gen_statem:start_link({local, Name}, ?MODULE, {Connection, Client}, []);
+start_link({Connection, Client}) ->
+  gen_statem:start_link(?MODULE, {Connection, Client}, []).
 
 -spec start_link(connection(), pid()) ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
@@ -260,8 +262,14 @@ open_proxy(internal, _, StateData) ->
 %% This function exists only to make Elvis happy.
 %% I do not think it makes things any easier to read.
 -spec open_common(_, _, _) -> _.
-open_common(internal, {Host, Port, Opts}, StateData) ->
-  {ok, GunPid} = gun:open(Host, Port, Opts),
+open_common(internal, {Host, Port, Opts}, #{ connection := #{ fuse := Fuse } } = StateData) ->
+  {ok, GunPid} =
+    try
+      gun:open(Host, Port, Opts)
+    catch
+      _:_ ->
+        maybe_melt_fuse(Fuse)
+    end,
   GunMon = monitor(process, GunPid),
   {next_state, await_up,
     StateData#{gun_pid => GunPid, gun_monitor => GunMon},
@@ -316,21 +324,27 @@ connected(internal, on_connect, #{client := undefined}) ->
 connected(internal, on_connect, #{client := Client}) ->
   Client ! {connection_up, self()},
   keep_state_and_data;
+
+
 connected( {call, {Client, _} = From}
          , {push_notification, DeviceId, Notification, Headers}
          , #{client := Client} = StateData) ->
   #{connection := Connection, gun_pid := GunPid} = StateData,
-  #{timeout := Timeout} = Connection,
-  Response = push(GunPid, DeviceId, Headers, Notification, Timeout),
+  #{timeout := Timeout, fuse := Fuse} = Connection,
+  Response = push(GunPid, DeviceId, Headers, Notification, Timeout, Fuse),
   {keep_state_and_data, {reply, From, Response}};
+
+
 connected( {call, {Client, _} = From}
          , {push_notification, Token, DeviceId, Notification, Headers0}
          , #{client := Client} = StateData) ->
   #{connection := Connection, gun_pid := GunConn} = StateData,
-  #{timeout := Timeout} = Connection,
+  #{timeout := Timeout, fuse := Fuse} = Connection,
   Headers = add_authorization_header(Headers0, Token),
-  Response = push(GunConn, DeviceId, Headers, Notification, Timeout),
+  Response = push(GunConn, DeviceId, Headers, Notification, Timeout, Fuse),
   {keep_state_and_data, {reply, From, Response}};
+
+
 connected({call, From}, Event, _) when element(1, Event) =:= push_notification ->
   {keep_state_and_data, {reply, From, {error, not_connection_owner}}};
 connected({call, From}, wait_apns_connection_up, _) ->
@@ -343,7 +357,8 @@ connected(EventType, EventContent, StateData) ->
 -spec down(_, _, _) -> _.
 down(internal
     , _
-    , #{ gun_pid         := GunPid
+    , #{ connection      := #{ fuse := Fuse }
+       , gun_pid         := GunPid
        , gun_monitor     := GunMon
        , client          := Client
        , backoff         := Backoff
@@ -351,10 +366,8 @@ down(internal
        }) ->
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
-  case Client of
-    undefined -> ok;
-    _ -> Client ! {reconnecting, self()}
-  end,
+  maybe_melt_fuse(Fuse),
+  Client ! {reconnecting, self()},
   Sleep = backoff(Backoff, Ceiling) * 1000,
   {keep_state_and_data, {state_timeout, Sleep, backoff}};
 down(state_timeout, backoff, StateData) ->
@@ -484,9 +497,11 @@ get_device_path(DeviceId) ->
 add_authorization_header(Headers, Token) ->
   Headers#{apns_auth_token => <<"bearer ", Token/binary>>}.
 
--spec push(pid(), apns:device_id(), apns:headers(), notification(), integer()) ->
-  apns:stream_id().
-push(GunConn, DeviceId, HeadersMap, Notification, Timeout) ->
+-spec push(
+    pid(), apns:device_id(), apns:headers(),
+    notification(), integer(), fuse()
+  ) -> apns:stream_id().
+push(GunConn, DeviceId, HeadersMap, Notification, Timeout, Fuse) ->
   Headers = get_headers(HeadersMap),
   Path = get_device_path(DeviceId),
   StreamRef = gun:post(GunConn, Path, Headers, Notification),
@@ -497,7 +512,9 @@ push(GunConn, DeviceId, HeadersMap, Notification, Timeout) ->
         {ok, Body} = gun:await_body(GunConn, StreamRef, Timeout),
         DecodedBody = jsx:decode(Body),
         {Status, ResponseHeaders, DecodedBody};
-      {error, timeout} -> timeout
+      {error, timeout} ->
+        maybe_melt_fuse(Fuse),
+        timeout
   end.
 
 -spec backoff(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
@@ -508,4 +525,10 @@ backoff(N, Ceiling) ->
     NextN ->
       NString = float_to_list(NextN, [{decimals, 0}]),
       list_to_integer(NString)
+  end.
+
+maybe_melt_fuse(Fuse) ->
+  case Fuse of
+    undefined -> ok;
+    Fuse when is_atom(Fuse) -> apns:fuse_melt(Fuse)
   end.

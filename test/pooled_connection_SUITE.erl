@@ -6,7 +6,8 @@
         ]).
 
 -export([
-  create_pool_of_connections/1
+  create_and_remove_pool_of_connections/1,
+  fuse_works/1
 ]).
 
 -type config() :: [{atom(), term()}].
@@ -15,7 +16,8 @@
 
 -spec all() -> [atom()].
 all() ->  [
-  create_pool_of_connections
+  create_and_remove_pool_of_connections,
+  fuse_works
 ].
 
 -spec init_per_suite(config()) -> config().
@@ -31,29 +33,81 @@ end_per_suite(Config) ->
 
 %
 
--spec create_pool_of_connections(config()) -> ok.
-create_pool_of_connections(_Config) ->
+-spec create_and_remove_pool_of_connections(config()) -> ok.
+create_and_remove_pool_of_connections(_Config) ->
   ok = mock_gun_open(),
   PoolSize = 3,
+  PoolName = ?FUNCTION_NAME,
   Connection = #{
       pool => #{
           size => PoolSize
       },
+      name => PoolName,
       apple_host => <<"apple-host">>,
       apple_port => <<"apple-port">>,
       keydata => <<"keydata">>,
       certdata => <<"certdata">>,
       timeout => 5000,
-      type => certdata,
-      proxy_info =>
-        #{type => connect, host => <<"proxy-host">>, port => <<"proxy-port">>}
+      type => certdata
   },
-  PoolName = <<"pooled_apns_connection">>,
-  {ok, PoolPid} = apns:connect_pooled(PoolName, Connection),
-  {ready, PoolSize, _, _} = poolboy:status(PoolPid),
-  apns:disconnect_pooled(PoolName),
+
+  {ok, PoolPid} = apns:connect(Connection),
+  ok = fuse:ask(PoolName, sync),
+  {ready, PoolSize, _, _} = poolboy:status(PoolName),
+  apns:close_connection(PoolName),
+  {error, not_found} = fuse:ask(PoolName, sync),
   false = is_process_alive(PoolPid),
+
   [_] = meck:unload().
+
+-spec fuse_works(config()) -> ok.
+fuse_works(_Config) ->
+  ok = mock_gun_open(),
+  PoolSize = 3,
+  PoolName = ?FUNCTION_NAME,
+  Connection = #{
+      pool => #{
+          size => PoolSize
+      },
+      fuse => {
+        {standard, 5, 60000},
+        {reset, 5000}
+      },
+      name => PoolName,
+      apple_port => <<"apple-port">>,
+      apple_host => <<"apple-host">>,
+      keydata => <<"keydata">>,
+      certdata => <<"certdata">>,
+      timeout => 5000,
+      type => certdata
+  },
+  {ok, PoolPid} = apns:connect(Connection),
+
+  ok = fuse:ask(PoolName, sync),
+  {ready, PoolSize, _, _} = poolboy:status(PoolName),
+
+  timeout = apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+  timeout = apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+  timeout = apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+  timeout = apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+  timeout = apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+  timeout = apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+
+  {error, not_connected} =
+    apns:push_notification(PoolName, <<"test-device-1">>, #{ <<"hello">> => <<"world">> }),
+
+  blown = fuse:ask(PoolName, sync),
+  timer:sleep(5000),
+  ok = fuse:ask(PoolName, sync),
+
+  {ready, PoolSize, _, _} = poolboy:status(PoolName),
+
+  apns:close_connection(PoolName),
+  {error, not_found} = fuse:ask(PoolName, sync),
+  false = is_process_alive(PoolPid),
+
+  [_] = meck:unload().
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Internal Functions
