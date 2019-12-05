@@ -88,7 +88,11 @@ stop() ->
   {ok, pid()}.
 connect(Type, ConnectionName) ->
   DefaultConnection = apns_connection:default_connection(Type, ConnectionName),
-  connect(DefaultConnection).
+  Conn = case ConnectionName of
+    undefined -> maps:without([name], DefaultConnection);
+    _ -> DefaultConnection
+  end,
+  connect(Conn).
 
 %% @doc Connects to APNs service
 -spec connect(apns_connection:connection()) -> {ok, pid()}.
@@ -114,7 +118,8 @@ connect(Connection) ->
           apns_sup:create_connection(Connection#{ fuse => Name });
 
         Pool ->
-          apns_pools:start_pool(Name, Connection#{ name => undefined, fuse => Name })
+          %  pooled connections should be nameless
+          apns_pools:start_pool(Name, maps:without([name], Connection#{ fuse => Name }))
       end
   end.
 
@@ -172,22 +177,7 @@ push_notification(ConnectionId, DeviceId, JSONMap) ->
                        ) -> response() | {error, not_connection_owner}.
 push_notification(ConnectionId, DeviceId, JSONMap, Headers) ->
   Notification = jsx:encode(JSONMap),
-
-  case apns_pools:find_pool(ConnectionId) of
-    {ok, _} ->
-        apns_pools:push_notification( ConnectionId
-                                    , DeviceId
-                                    , Notification
-                                    , Headers
-                                    );
-
-    {error, not_found} ->
-      apns_connection:push_notification(ConnectionId
-                                      , DeviceId
-                                      , Notification
-                                      , Headers
-                                      )
-  end.
+  do_push(ConnectionId, #{ device_id => DeviceId, notification => Notification, headers => Headers }).
 
 %% @doc Push notification to APNs with authentication token. It will use the
 %%      headers provided on the environment variables.
@@ -209,37 +199,40 @@ push_notification_token(ConnectionId, Token, DeviceId, JSONMap) ->
                              ) -> response() | {error, not_connection_owner}.
 push_notification_token(ConnectionId, Token, DeviceId, JSONMap, Headers) ->
   Notification = jsx:encode(JSONMap),
+  do_push(ConnectionId,  #{ device_id => DeviceId,
+                            notification => Notification,
+                            headers => Headers,
+                            token => Token }).
 
-  case apns_pools:find_pool(ConnectionId) of
+-spec do_push(apns_connection:name(), list()) -> ok | {error, not_connected} | {error, unknown_pool}.
+do_push(Name, Params) when is_pid(Name) ->
+  apply(apns_connection, push_notification, Params#{ start => ?MNOW });
+do_push(Name, Params) when is_atom(Name) ->
+  case apns_pools:find_pool(Name) of
     {ok, _} ->
-      apns_pools:push_notification( ConnectionId
-                                  , Token
-                                  , DeviceId
-                                  , Notification
-                                  , Headers
-                                  );
-    {error, not_found} ->
-      apns_connection:push_notification( ConnectionId
-                                      , Token
-                                      , DeviceId
-                                      , Notification
-                                      , Headers
-                                      )
-  end.
+      case fuse:ask(Name, sync) of
+        ok ->
+          apply(apns_pools, push_notification, Params#{ start => ?MNOW });
 
+        blown ->
+          {error, not_connected};
 
-
-push_() ->
-  case fuse:ask(Name, sync) of
-    ok ->
-      do_push();
-
-    blown ->
-      {error, not_connected};
+        {error, not_found} ->
+          {error, unknown_pool}
+      end;
 
     {error, not_found} ->
-      {error, unknown_pool}
+      case fuse:ask(Name, sync) of
+        ok ->
+          apply(apns_connection, push_notification, Params#{ start => ?MNOW });
+        blown ->
+          {error, not_connected};
+
+        {error, not_found} ->
+          {error, unknown_connection}
+      end
   end.
+
 
 
 

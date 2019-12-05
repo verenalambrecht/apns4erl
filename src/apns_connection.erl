@@ -23,7 +23,6 @@
 
 %% API
 -export([ start_link/1
-        , start_link/2
         , default_connection/2
         , name/1
         , host/1
@@ -35,8 +34,7 @@
         , type/1
         , gun_pid/1
         , close_connection/1
-        , push_notification/4
-        , push_notification/5
+        , push_notification/2
         , wait_apns_connection_up/1
         ]).
 
@@ -89,6 +87,7 @@
                          , timeout    => integer()
                          , type       := type()
                          , proxy_info => proxy_info()
+                         , client     => pid()
                          , fuse       => fuse()
                          , start      => integer()
                          }.
@@ -97,31 +96,28 @@
                          , gun_pid         => pid()
                          , gun_monitor     => reference()
                          , gun_connect_ref => reference()
-                         , client          := pid()
                          , backoff         := non_neg_integer()
                          , backoff_ceiling := non_neg_integer()
                          }.
+
+-type request() :: #{
+  device_id => apns:device_id(),
+  start => integer(),
+  token => apns:token(),
+  headers => apns:headers(),
+  notification => notification()
+}.
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-%% @doc starts the gen_statem
--spec start_link({connection(), pid()}) ->
+-spec start_link(connection()) ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
-start_link({#{name := Name} = Connection, Client}) ->
-  Name = name(Connection),
-  gen_statem:start_link({local, Name}, ?MODULE, {Connection, Client}, []);
-start_link({Connection, Client}) ->
-  gen_statem:start_link(?MODULE, {Connection, Client}, []).
-
--spec start_link(connection(), pid()) ->
-  {ok, Pid :: pid()} | ignore | {error, Reason :: term()}.
-start_link(#{name := undefined} = Connection, Client) ->
-  gen_statem:start_link(?MODULE, {Connection, Client}, []);
-start_link(Connection, Client) ->
-  Name = name(Connection),
-  gen_statem:start_link({local, Name}, ?MODULE, {Connection, Client}, []).
+start_link(#{name := Name} = Connection) ->
+  gen_statem:start_link({local, Name}, ?MODULE, Connection, []);
+start_link(Connection) ->
+  gen_statem:start_link(?MODULE, Connection, []).
 
 %% @doc Builds a connection() map from the environment variables.
 -spec default_connection(type(), name()) -> connection().
@@ -178,21 +174,9 @@ gun_pid(ConnectionId) ->
   gen_statem:call(ConnectionId, gun_pid).
 
 %% @doc Pushes notification to certificate APNs connection.
--spec push_notification( name() | pid()
-                       , apns:device_id()
-                       , notification()
-                       , apns:headers()) -> apns:response() | {error, not_connection_owner}.
-push_notification(ConnectionId, DeviceId, Notification, Headers) ->
-  gen_statem:call(ConnectionId, {push_notification, DeviceId, Notification, Headers}).
-
-%% @doc Pushes notification to certificate APNs connection.
--spec push_notification( name() | pid()
-                       , apns:token()
-                       , apns:device_id()
-                       , notification()
-                       , apns:headers()) -> apns:response() | {error, not_connection_owner}.
-push_notification(ConnectionId, Token, DeviceId, Notification, Headers) ->
-  gen_statem:call(ConnectionId, {push_notification, Token, DeviceId, Notification, Headers}).
+-spec push_notification(name() | pid(), request()) -> apns:response() | {error, not_connection_owner}.
+push_notification(ConnectionId, Request) ->
+  gen_statem:call(ConnectionId, {push_notification, Request}).
 
 %% @doc Waits until the APNS connection is up.
 %%
@@ -216,9 +200,11 @@ callback_mode() -> state_functions.
      , State :: state()
      , {next_event, internal, init}
      }.
-init({Connection, Client}) ->
+init(Connection) ->
+  prometheus_counter:inc(apns_workers_started_total,
+                        [maps:get(name, Connection, undefined)]),
+
   StateData = #{ connection      => Connection
-               , client          => Client
                , backoff         => 1
                , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
                },
@@ -319,31 +305,20 @@ await_tunnel_up(EventType, EventContent, StateData) ->
   handle_common(EventType, EventContent, ?FUNCTION_NAME, StateData, postpone).
 
 -spec connected(_, _, _) -> _.
-connected(internal, on_connect, #{client := undefined}) ->
-  keep_state_and_data;
-connected(internal, on_connect, #{client := Client}) ->
-  Client ! {connection_up, self()},
+connected(internal, on_connect, #{connection := Connection}) ->
+  Client = maps:get(client, Connection, undefined),
+  maybe_send(Client, {connection_up, self()}),
   keep_state_and_data;
 
+connected(internal, on_connect, _) ->
+  keep_state_and_data;
 
-connected( {call, {Client, _} = From}
-         , {push_notification, DeviceId, Notification, Headers}
-         , #{client := Client} = StateData) ->
+connected( {call, From}
+         , {push_notification, Request}
+         , StateData) ->
   #{connection := Connection, gun_pid := GunPid} = StateData,
-  #{timeout := Timeout, fuse := Fuse} = Connection,
-  Response = push(GunPid, DeviceId, Headers, Notification, Timeout, Fuse),
+  Response = push(GunPid, Request, Connection),
   {keep_state_and_data, {reply, From, Response}};
-
-
-connected( {call, {Client, _} = From}
-         , {push_notification, Token, DeviceId, Notification, Headers0}
-         , #{client := Client} = StateData) ->
-  #{connection := Connection, gun_pid := GunConn} = StateData,
-  #{timeout := Timeout, fuse := Fuse} = Connection,
-  Headers = add_authorization_header(Headers0, Token),
-  Response = push(GunConn, DeviceId, Headers, Notification, Timeout, Fuse),
-  {keep_state_and_data, {reply, From, Response}};
-
 
 connected({call, From}, Event, _) when element(1, Event) =:= push_notification ->
   {keep_state_and_data, {reply, From, {error, not_connection_owner}}};
@@ -357,20 +332,23 @@ connected(EventType, EventContent, StateData) ->
 -spec down(_, _, _) -> _.
 down(internal
     , _
-    , #{ connection      := #{ fuse := Fuse }
+    , #{ connection      := Connection
        , gun_pid         := GunPid
        , gun_monitor     := GunMon
-       , client          := Client
        , backoff         := Backoff
        , backoff_ceiling := Ceiling
        }) ->
+  Client = maps:get(client, Connection, undefined),
+  Fuse = maps:get(fuse, Connection, undefined),
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
   maybe_melt_fuse(Fuse),
-  Client ! {reconnecting, self()},
+  maybe_send(Client, {reconnecting, self()}),
   Sleep = backoff(Backoff, Ceiling) * 1000,
   {keep_state_and_data, {state_timeout, Sleep, backoff}};
-down(state_timeout, backoff, StateData) ->
+down(state_timeout, backoff, #{connection := Connection} = StateData) ->
+  Name = maps:get(name, Connection, undefined),
+  prometheus_counter:inc(apns_reconnects_total, [Name, waiting_gun_up]),
   {next_state, open_connection, StateData,
     {next_event, internal, init}};
 down(EventType, EventContent, StateData) ->
@@ -499,12 +477,27 @@ add_authorization_header(Headers, Token) ->
 
 -spec push(
     pid(), apns:device_id(), apns:headers(),
-    notification(), integer(), fuse()
+    notification(), connection()
   ) -> apns:stream_id().
-push(GunConn, DeviceId, HeadersMap, Notification, Timeout, Fuse) ->
-  Headers = get_headers(HeadersMap),
+push(GunConn,
+     #{device_id := DeviceId,
+       headers := Headers0,
+       start := Start,
+       notification := Notification} = Request,
+     Connection) ->
+
+  Timeout = maps:get(timeout, Connection, undefined),
+  Client = maps:get(client, Connection, undefined),
+  Fuse = maps:get(fuse, Connection, undefined),
+
+  Headers = case maps:get(token, Request, undefined) of
+    undefined -> get_headers(Headers0);
+    Token -> get_headers(add_authorization_header(Headers0, Token))
+  end,
+
   Path = get_device_path(DeviceId),
   StreamRef = gun:post(GunConn, Path, Headers, Notification),
+
   case gun:await(GunConn, StreamRef, Timeout) of
       {response, fin, Status, ResponseHeaders} ->
         {Status, ResponseHeaders, no_body};
@@ -513,6 +506,9 @@ push(GunConn, DeviceId, HeadersMap, Notification, Timeout, Fuse) ->
         DecodedBody = jsx:decode(Body),
         {Status, ResponseHeaders, DecodedBody};
       {error, timeout} ->
+
+        prometheus_counter:inc(apns_requests_total, [Pool, checkout_timeout]),
+        maybe_send(Client, {connection_timeout, self()}),
         maybe_melt_fuse(Fuse),
         timeout
   end.
@@ -531,4 +527,11 @@ maybe_melt_fuse(Fuse) ->
   case Fuse of
     undefined -> ok;
     Fuse when is_atom(Fuse) -> apns:fuse_melt(Fuse)
+  end.
+
+maybe_send(Pid, Message) ->
+  case Pid of
+    Pid when is_pid(Pid) ->
+      Pid ! Message;
+    _ -> ok
   end.

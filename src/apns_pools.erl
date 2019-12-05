@@ -13,6 +13,7 @@
   start_apns_pool/2,
   stop_pool/1,
   stop_pool/2,
+  pools/0,
   find_pool/1,
   push_notification/4,
   push_notification/5
@@ -31,6 +32,11 @@ stop_pool(Name) ->
 stop_pool(Name, Timeout) ->
   gen_server:call(?MODULE,
                   {stop_pool, Name, Timeout}).
+
+pools() ->
+    lists:foldl(fun({Name, _OnlineCount, Config}, Pools) ->
+                        Pools#{Name => Config}
+                end, #{}, ets:tab2list(?POOLS_TABLE)).
 
 find_pool(Name) ->
   case ets:lookup(?POOLS_TABLE, Name) of
@@ -134,7 +140,7 @@ start_apns_pool(Name, Params) ->
 
   PoolArgs = maps:merge(PoolConfig, #{
     name => {local, Name},
-    worker_module => apns_connection_pooled
+    worker_module => apns_connection
   }),
 
-  poolboy:start(maps:to_list(PoolArgs), {Params, erlang:whereis(apns_pools)}).
+  poolboy:start(maps:to_list(PoolArgs), Params).

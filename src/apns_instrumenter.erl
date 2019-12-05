@@ -22,7 +22,7 @@ setup() ->
     prometheus_counter:declare([{name, apns_pool_requests_total},
                                 {labels, [name]},
                                 {help, "Pool requests counter."}]),
-    prometheus_counter:declare([{name, apns_pool_workers_started_total},
+    prometheus_counter:declare([{name, apns_workers_started_total},
                                 {labels, [name]},
                                 {help, "Total number of worker processes started by this pool."}]),
 
@@ -36,8 +36,7 @@ setup() ->
     %% catch. If gen_server:call is ok, finishes inside apns_conn call handler..
     prometheus_summary:declare([{name, apns_requests_waiting_microseconds},
                                 {labels, [name, result]},
-                                {help, "Counting requests on apns side"}]),
-
+                                {help, "Counting requests waiting on apns side"}]),
 
     prometheus_registry:register_collector(?MODULE).
 
@@ -57,7 +56,7 @@ add_metric_family({Name, Type, Help, Metrics}, Callback) ->
     Callback(create_mf(?METRIC_NAME(Name), Help, Type, Metrics)).
 
 metrics() ->
-    Pools = apns:pools(),
+    Pools = apns_pools:pools(),
     MetricsBlank = #{online => [],
                      size => [],
                      max_overflow => [],
@@ -66,40 +65,40 @@ metrics() ->
                      overflow_workers => [],
                      workers => []},
     Stat = maps:fold(
-             fun(Name, #{pool_args := PoolArgs},
-                 #{online := OldOnline,
-                   size := OldSize,
-                   max_overflow := OldMaxOverflow,
-                   state := OldState,
-                   free_fixed_workers := OldFFW,
-                   overflow_workers := OldOverflowWorkers,
-                   workers := OldWorkers}) ->
+        fun(Name, #{pool_args := PoolArgs},
+            #{online := OldOnline,
+            size := OldSize,
+            max_overflow := OldMaxOverflow,
+            state := OldState,
+            free_fixed_workers := OldFFW,
+            overflow_workers := OldOverflowWorkers,
+            workers := OldWorkers}) ->
 
-                     %% TODO: consider using apns:status here
-                     Size = proplists:get_value(size, PoolArgs),
-                     MaxOverflow = proplists:get_value(max_overflow, PoolArgs),
+            %% TODO: consider using apns:status here
+            Size = proplists:get_value(size, PoolArgs),
+            MaxOverflow = proplists:get_value(max_overflow, PoolArgs),
 
-                     try poolboy:status(Name) of
-                         {State, FreeFixedWorkers, OverflowWorkers, Workers} ->
-                             #{online => [{[{name, Name}], fuse:ask(Name, async_dirty) =:= ok} | OldOnline],
-                               size => [{[{name, Name}], Size} | OldSize],
-                               max_overflow => [{[{name, Name}], MaxOverflow} | OldMaxOverflow],
-                               state => [{[{name, Name}], pool_state(Name, State)} | OldState],
-                               free_fixed_workers => [{[{name, Name}], FreeFixedWorkers} | OldFFW],
-                               overflow_workers => [{[{name, Name}], OverflowWorkers} | OldOverflowWorkers],
-                               workers => [{[{name, Name}], Workers} | OldWorkers]}
-                     catch
-                         exit:{timeout, {gen_server, call, [Name, _]}} ->
-                             #{online => [{[{name, Name}], fuse:ask(Name, async_dirty) =:= ok} | OldOnline],
-                               size => [{[{name, Name}], Size} | OldSize],
-                               max_overflow => [{[{name, Name}], MaxOverflow} | OldMaxOverflow],
-                               state => [{[{name, Name}], undefined} | OldState],
-                               free_fixed_workers => [{[{name, Name}], undefined} | OldFFW],
-                               overflow_workers => [{[{name, Name}], undefined} | OldOverflowWorkers],
-                               workers => [{[{name, Name}], undefined} | OldWorkers]}
-                     end
-             end,
-             MetricsBlank, Pools),
+            try poolboy:status(Name) of
+                {State, FreeFixedWorkers, OverflowWorkers, Workers} ->
+                    #{online => [{[{name, Name}], fuse:ask(Name, async_dirty) =:= ok} | OldOnline],
+                    size => [{[{name, Name}], Size} | OldSize],
+                    max_overflow => [{[{name, Name}], MaxOverflow} | OldMaxOverflow],
+                    state => [{[{name, Name}], pool_state(Name, State)} | OldState],
+                    free_fixed_workers => [{[{name, Name}], FreeFixedWorkers} | OldFFW],
+                    overflow_workers => [{[{name, Name}], OverflowWorkers} | OldOverflowWorkers],
+                    workers => [{[{name, Name}], Workers} | OldWorkers]}
+            catch
+                exit:{timeout, {gen_server, call, [Name, _]}} ->
+                    #{online => [{[{name, Name}], fuse:ask(Name, async_dirty) =:= ok} | OldOnline],
+                    size => [{[{name, Name}], Size} | OldSize],
+                    max_overflow => [{[{name, Name}], MaxOverflow} | OldMaxOverflow],
+                    state => [{[{name, Name}], undefined} | OldState],
+                    free_fixed_workers => [{[{name, Name}], undefined} | OldFFW],
+                    overflow_workers => [{[{name, Name}], undefined} | OldOverflowWorkers],
+                    workers => [{[{name, Name}], undefined} | OldWorkers]}
+            end
+        end,
+        MetricsBlank, Pools),
 
     [{pools, gauge,
       "Number of configured pools.",

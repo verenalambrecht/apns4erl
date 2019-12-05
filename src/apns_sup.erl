@@ -48,7 +48,7 @@ start_link() ->
 %%      parameter in order to create the connection with APNs.
 -spec create_connection(apns_connection:connection()) -> {ok, pid()}.
 create_connection(Connection) ->
-  supervisor:start_child(?MODULE, [Connection, self()]).
+  supervisor:start_child(?MODULE, [Connection]).
 
 %%%===================================================================
 %%% Supervisor callbacks

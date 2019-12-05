@@ -33,7 +33,7 @@
 
 -spec start(term(), term()) -> {error, term()} | {ok, pid()}.
 start(_StartType, _StartArgs) ->
-  apns_instrumenter:setup(),
+  % apns_instrumenter:setup(),
   qwe_sup:start_link().
 
 -spec stop(term()) -> ok.
