@@ -207,8 +207,8 @@ callback_mode() -> state_functions.
 init({Connection, Client}) ->
   StateData = #{ connection      => Connection
                , client          => Client
-               , backoff         => 1
-               , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
+               , backoff         => maps:get(backoff, Connection, 0)
+               , backoff_ceiling => maps:get(backoff_ceiling, Connection, 10)
                },
   {ok, open_connection, StateData,
     {next_event, internal, init}}.
@@ -336,12 +336,13 @@ down(internal
        , client          := Client
        , backoff         := Backoff
        , backoff_ceiling := Ceiling
-       }) ->
+       } = StateData0) ->
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
   Client ! {reconnecting, self()},
-  Sleep = backoff(Backoff, Ceiling) * 1000,
-  {keep_state_and_data, {state_timeout, Sleep, backoff}};
+  StateData = StateData0#{ backoff => backoff(Backoff, Ceiling) },
+  Sleep = maps:get(backoff, StateData) * 1000,
+  {keep_state, StateData, {state_timeout, Sleep, backoff}};
 down(state_timeout, backoff, StateData) ->
   {next_state, open_connection, StateData,
     {next_event, internal, init}};
@@ -485,7 +486,7 @@ push(GunConn, DeviceId, HeadersMap, Notification, Timeout) ->
 
 -spec backoff(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
 backoff(N, Ceiling) ->
-  case (math:pow(2, N) - 1) of
+  case (math:pow(2, N)) of
     R when R > Ceiling ->
       Ceiling;
     NextN ->
