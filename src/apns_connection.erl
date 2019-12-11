@@ -127,6 +127,10 @@ default_connection(certdata, ConnectionName) ->
    , keydata    => Key
    , timeout    => Timeout
    , type       => certdata
+   % starting with backoff = 0 because 2^0=1, so we start from 1 sec delay,
+   % delays chain by default will be 1 2 4 16 65536 seconds
+   , backoff         => 0
+   , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
   };
 default_connection(cert, ConnectionName) ->
   {ok, Host} = application:get_env(apns, apple_host),
@@ -142,6 +146,8 @@ default_connection(cert, ConnectionName) ->
    , keyfile    => Keyfile
    , timeout    => Timeout
    , type       => cert
+   , backoff         => 0
+   , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
   };
 default_connection(token, ConnectionName) ->
   {ok, Host} = application:get_env(apns, apple_host),
@@ -153,6 +159,8 @@ default_connection(token, ConnectionName) ->
    , apple_port => Port
    , timeout    => Timeout
    , type       => token
+   , backoff         => 0
+   , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
   }.
 
 %% @doc Close the connection with APNs gracefully
@@ -208,6 +216,7 @@ init({Connection, Client}) ->
   StateData = #{ connection      => Connection
                , client          => Client
                , backoff         => maps:get(backoff, Connection, 0)
+               , default_backoff => maps:get(backoff, Connection, 0)
                , backoff_ceiling => maps:get(backoff_ceiling, Connection, 10)
                },
   {ok, open_connection, StateData,
@@ -301,9 +310,10 @@ await_tunnel_up(EventType, EventContent, StateData) ->
   handle_common(EventType, EventContent, ?FUNCTION_NAME, StateData, postpone).
 
 -spec connected(_, _, _) -> _.
-connected(internal, on_connect, #{client := Client}) ->
+connected(internal, on_connect, #{client := Client,
+                                  default_backoff := Backoff} = StateData) ->
   Client ! {connection_up, self()},
-  keep_state_and_data;
+  {keep_state, StateData#{ backoff => Backoff }};
 connected( {call, {Client, _} = From}
          , {push_notification, DeviceId, Notification, Headers}
          , #{client := Client} = StateData) ->
