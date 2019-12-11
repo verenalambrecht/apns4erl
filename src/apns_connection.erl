@@ -119,6 +119,8 @@ default_connection(certdata, ConnectionName) ->
   {ok, Cert} = application:get_env(apns, certdata),
   {ok, Key} = application:get_env(apns, keydata),
   {ok, Timeout} = application:get_env(apns, timeout),
+  {ok, Backoff} = application:get_env(apns, backoff),
+  {ok, BackoffCeiling} = application:get_env(apns, backoff_ceiling),
 
   #{ name       => ConnectionName
    , apple_host => Host
@@ -127,10 +129,8 @@ default_connection(certdata, ConnectionName) ->
    , keydata    => Key
    , timeout    => Timeout
    , type       => certdata
-   % starting with backoff = 0 because 2^0=1, so we start from 1 sec delay,
-   % delays chain by default will be 1 2 4 16 65536 seconds
-   , backoff         => 0
-   , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
+   , backoff         => Backoff
+   , backoff_ceiling => BackoffCeiling
   };
 default_connection(cert, ConnectionName) ->
   {ok, Host} = application:get_env(apns, apple_host),
@@ -138,6 +138,8 @@ default_connection(cert, ConnectionName) ->
   {ok, Certfile} = application:get_env(apns, certfile),
   {ok, Keyfile} = application:get_env(apns, keyfile),
   {ok, Timeout} = application:get_env(apns, timeout),
+  {ok, Backoff} = application:get_env(apns, backoff),
+  {ok, BackoffCeiling} = application:get_env(apns, backoff_ceiling),
 
   #{ name       => ConnectionName
    , apple_host => Host
@@ -146,21 +148,23 @@ default_connection(cert, ConnectionName) ->
    , keyfile    => Keyfile
    , timeout    => Timeout
    , type       => cert
-   , backoff         => 0
-   , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
+   , backoff         => Backoff
+   , backoff_ceiling => BackoffCeiling
   };
 default_connection(token, ConnectionName) ->
   {ok, Host} = application:get_env(apns, apple_host),
   {ok, Port} = application:get_env(apns, apple_port),
   {ok, Timeout} = application:get_env(apns, timeout),
+  {ok, Backoff} = application:get_env(apns, backoff),
+  {ok, BackoffCeiling} = application:get_env(apns, backoff_ceiling),
 
   #{ name       => ConnectionName
    , apple_host => Host
    , apple_port => Port
    , timeout    => Timeout
    , type       => token
-   , backoff         => 0
-   , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
+   , backoff         => Backoff
+   , backoff_ceiling => BackoffCeiling
   }.
 
 %% @doc Close the connection with APNs gracefully
@@ -344,14 +348,15 @@ down(internal
     , #{ gun_pid         := GunPid
        , gun_monitor     := GunMon
        , client          := Client
-       , backoff         := Backoff
+       , backoff         := Backoff0
        , backoff_ceiling := Ceiling
        } = StateData0) ->
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
   Client ! {reconnecting, self()},
-  StateData = StateData0#{ backoff => backoff(Backoff, Ceiling) },
-  Sleep = maps:get(backoff, StateData) * 1000,
+  Backoff = backoff(Backoff0, Ceiling),
+  StateData = StateData0#{ backoff => Backoff },
+  Sleep = Backoff * 1000,
   {keep_state, StateData, {state_timeout, Sleep, backoff}};
 down(state_timeout, backoff, StateData) ->
   {next_state, open_connection, StateData,
@@ -496,7 +501,7 @@ push(GunConn, DeviceId, HeadersMap, Notification, Timeout) ->
 
 -spec backoff(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
 backoff(N, Ceiling) ->
-  case (math:pow(2, N)) of
+  case math:pow(2, N) of
     R when R > Ceiling ->
       Ceiling;
     NextN ->

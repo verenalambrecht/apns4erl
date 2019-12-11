@@ -254,7 +254,6 @@ gun_connection_lost_timeout(_Config) ->
   ok = mock_gun_open(),
   ConnectionName = ?FUNCTION_NAME,
   % when backoff is greater than ceiling
-  ok = application:set_env(apns, backoff_ceiling, 2),
   {ok, ServerPid}  = apns:connect(cert, ConnectionName),
   GunPid = apns_connection:gun_pid(ConnectionName),
   ok = meck:expect(gun, close, fun(_) ->
@@ -278,11 +277,8 @@ gun_connection_lost_timeout(_Config) ->
   true = (GunPid2 =/= GunPid3),
 
   ok = close_connection(ConnectionName),
-  ok = application:set_env(apns, backoff_ceiling, 10),
   [_] = meck:unload(),
   ok.
-
-
 
 -spec gun_connection_killed(config()) -> ok.
 gun_connection_killed(_Config) ->
