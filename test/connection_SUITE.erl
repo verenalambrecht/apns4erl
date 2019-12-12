@@ -10,6 +10,7 @@
         , certdata_keydata_connection/1
         , connect/1
         , connect_without_name/1
+        , backoff_sleep_time_grow_and_reset/1
         , gun_connection_lost/1
         , gun_connection_lost_timeout/1
         , gun_connection_killed/1
@@ -32,6 +33,7 @@ all() ->  [ default_connection
           , certdata_keydata_connection
           , connect
           , connect_without_name
+          , backoff_sleep_time_grow_and_reset
           , gun_connection_lost
           , gun_connection_lost_timeout
           , gun_connection_killed
@@ -142,12 +144,116 @@ gun_connection_lost(_Config) ->
   [_] = meck:unload(),
   ok.
 
+-spec backoff_sleep_time_grow_and_reset(config()) -> ok.
+backoff_sleep_time_grow_and_reset(_Config) ->
+  ConnectionName = ?FUNCTION_NAME,
+  ok = application:set_env(apns, backoff, 0),
+  ok = application:set_env(apns, backoff_ceiling, 10),
+  {ok, ServerPid}  = apns:connect(cert, ConnectionName),
+
+  % 1st reconnect is without delay
+  GunPid = apns_connection:gun_pid(ConnectionName),
+  Timestamp0 = erlang:monotonic_time(millisecond),
+  receive
+    {reconnecting, _} ->
+      Delta0 = erlang:monotonic_time(millisecond) - Timestamp0,
+      true = Delta0 < 1000
+  after
+    5000 -> ct:fail("timeout")
+  end,
+
+  % emulating 1sec delay
+  Timestamp1 = erlang:monotonic_time(millisecond),
+  ktn_task:wait_for(fun() ->
+      apns_connection:gun_pid(ConnectionName) == GunPid
+    end, false),
+  GunPid1 = apns_connection:gun_pid(ConnectionName),
+  receive
+    {reconnecting, _} ->
+        Delta1 = erlang:monotonic_time(millisecond) - Timestamp1,
+        true = Delta1 > 1000,
+        true = Delta1 < 2000
+  after
+    5000 -> ct:fail("timeout")
+  end,
+
+  % emulating 2sec delay
+  Timestamp2 = erlang:monotonic_time(millisecond),
+  ktn_task:wait_for(fun() ->
+      apns_connection:gun_pid(ConnectionName) == GunPid1
+    end, false),
+  GunPid2 = apns_connection:gun_pid(ConnectionName),
+  receive
+    {reconnecting, _} ->
+        Delta2 = erlang:monotonic_time(millisecond) - Timestamp2,
+        true = Delta2 > 2000,
+        true = Delta2 < 4000
+  after
+    5000 -> ct:fail("timeout")
+  end,
+
+  % emulating 4sec delay
+  Timestamp3 = erlang:monotonic_time(millisecond),
+  ktn_task:wait_for(fun() ->
+      apns_connection:gun_pid(ConnectionName) == GunPid2
+    end, false),
+  GunPid3 = apns_connection:gun_pid(ConnectionName),
+  receive
+    {reconnecting, _} ->
+        Delta3 = erlang:monotonic_time(millisecond) - Timestamp3,
+        true = Delta3 > 4000,
+        true = Delta3 < 16000
+  after
+    16000 -> ct:fail("timeout")
+  end,
+
+  % emulating 10sec delay (ceiling)
+  Timestamp4 = erlang:monotonic_time(millisecond),
+  ktn_task:wait_for(fun() ->
+      apns_connection:gun_pid(ConnectionName) == GunPid3
+    end, false),
+  receive
+    {reconnecting, _} ->
+        Delta4 = erlang:monotonic_time(millisecond) - Timestamp4,
+        true = Delta4 > 10000,
+        true = Delta4 < 16000
+  after
+    20000 -> ct:fail("timeout")
+  end,
+
+  % emulating successful connection
+  ok = mock_gun_open(),
+  GunPid4 = apns_connection:gun_pid(ConnectionName),
+  ktn_task:wait_for(fun() ->
+      apns_connection:gun_pid(ConnectionName) == GunPid4
+    end, false, 1000, 11),
+  receive
+    {connection_up, _} -> ok
+  after
+    5000 -> ct:fail("timeout")
+  end,
+
+  apns_connection:gun_pid(ConnectionName) ! {crash, ServerPid},
+  [_] = meck:unload(),
+
+  % next reconnect is without delay again
+  Timestamp5 = erlang:monotonic_time(millisecond),
+  receive
+    {reconnecting, _} ->
+      Delta5 = erlang:monotonic_time(millisecond) - Timestamp5,
+      true = Delta5 < 1000
+  after
+    5000 -> ct:fail("timeout")
+  end,
+
+  ok = close_connection(ConnectionName),
+  ok.
+
 -spec gun_connection_lost_timeout(config()) -> ok.
 gun_connection_lost_timeout(_Config) ->
   ok = mock_gun_open(),
   ConnectionName = ?FUNCTION_NAME,
   % when backoff is greater than ceiling
-  ok = application:set_env(apns, backoff_ceiling, 2),
   {ok, ServerPid}  = apns:connect(cert, ConnectionName),
   GunPid = apns_connection:gun_pid(ConnectionName),
   ok = meck:expect(gun, close, fun(_) ->
@@ -171,7 +277,6 @@ gun_connection_lost_timeout(_Config) ->
   true = (GunPid2 =/= GunPid3),
 
   ok = close_connection(ConnectionName),
-  ok = application:set_env(apns, backoff_ceiling, 10),
   [_] = meck:unload(),
   ok.
 

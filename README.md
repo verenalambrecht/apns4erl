@@ -37,6 +37,8 @@ First we have to fill our `config` data. There are two ways for do this, one is 
   , {keyfile,          "priv/apns-dev-key-noenc.pem"}
   , {token_keyfile,    "priv/APNsAuthKey_KEYID12345.p8"}
   , {timeout,          10000}
+  , {backoff,          0}
+  , {backoff_ceoling,  10}
 
   %% APNs Headers
 
@@ -65,6 +67,8 @@ The other way is send all that info as a parameter to `apns:connect/1` function 
  , keyfile    => path()
  , timeout    => integer()
  , type       := type()
+ , backoff    => integer()
+ , backoff_ceiling => integer()
  }.
 ```
 
@@ -103,6 +107,8 @@ After running `apns4erl` app we can start creating connections. As we mentioned 
    , keyfile    => path()
    , timeout    => integer()
    , type       := type()
+   , backoff    => integer()
+   , backoff_ceiling => integer()
    }.
   ```
   where the `type` field indicates if is `certdata`, `cert`, or `token`.

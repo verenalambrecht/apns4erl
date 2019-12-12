@@ -119,6 +119,8 @@ default_connection(certdata, ConnectionName) ->
   {ok, Cert} = application:get_env(apns, certdata),
   {ok, Key} = application:get_env(apns, keydata),
   {ok, Timeout} = application:get_env(apns, timeout),
+  {ok, Backoff} = application:get_env(apns, backoff),
+  {ok, BackoffCeiling} = application:get_env(apns, backoff_ceiling),
 
   #{ name       => ConnectionName
    , apple_host => Host
@@ -127,6 +129,8 @@ default_connection(certdata, ConnectionName) ->
    , keydata    => Key
    , timeout    => Timeout
    , type       => certdata
+   , backoff         => Backoff
+   , backoff_ceiling => BackoffCeiling
   };
 default_connection(cert, ConnectionName) ->
   {ok, Host} = application:get_env(apns, apple_host),
@@ -134,6 +138,8 @@ default_connection(cert, ConnectionName) ->
   {ok, Certfile} = application:get_env(apns, certfile),
   {ok, Keyfile} = application:get_env(apns, keyfile),
   {ok, Timeout} = application:get_env(apns, timeout),
+  {ok, Backoff} = application:get_env(apns, backoff),
+  {ok, BackoffCeiling} = application:get_env(apns, backoff_ceiling),
 
   #{ name       => ConnectionName
    , apple_host => Host
@@ -142,17 +148,23 @@ default_connection(cert, ConnectionName) ->
    , keyfile    => Keyfile
    , timeout    => Timeout
    , type       => cert
+   , backoff         => Backoff
+   , backoff_ceiling => BackoffCeiling
   };
 default_connection(token, ConnectionName) ->
   {ok, Host} = application:get_env(apns, apple_host),
   {ok, Port} = application:get_env(apns, apple_port),
   {ok, Timeout} = application:get_env(apns, timeout),
+  {ok, Backoff} = application:get_env(apns, backoff),
+  {ok, BackoffCeiling} = application:get_env(apns, backoff_ceiling),
 
   #{ name       => ConnectionName
    , apple_host => Host
    , apple_port => Port
    , timeout    => Timeout
    , type       => token
+   , backoff         => Backoff
+   , backoff_ceiling => BackoffCeiling
   }.
 
 %% @doc Close the connection with APNs gracefully
@@ -207,8 +219,9 @@ callback_mode() -> state_functions.
 init({Connection, Client}) ->
   StateData = #{ connection      => Connection
                , client          => Client
-               , backoff         => 1
-               , backoff_ceiling => application:get_env(apns, backoff_ceiling, 10)
+               , backoff         => maps:get(backoff, Connection, 0)
+               , default_backoff => maps:get(backoff, Connection, 0)
+               , backoff_ceiling => maps:get(backoff_ceiling, Connection, 10)
                },
   {ok, open_connection, StateData,
     {next_event, internal, init}}.
@@ -301,9 +314,10 @@ await_tunnel_up(EventType, EventContent, StateData) ->
   handle_common(EventType, EventContent, ?FUNCTION_NAME, StateData, postpone).
 
 -spec connected(_, _, _) -> _.
-connected(internal, on_connect, #{client := Client}) ->
+connected(internal, on_connect, #{client := Client,
+                                  default_backoff := Backoff} = StateData) ->
   Client ! {connection_up, self()},
-  keep_state_and_data;
+  {keep_state, StateData#{ backoff => Backoff }};
 connected( {call, {Client, _} = From}
          , {push_notification, DeviceId, Notification, Headers}
          , #{client := Client} = StateData) ->
@@ -334,14 +348,16 @@ down(internal
     , #{ gun_pid         := GunPid
        , gun_monitor     := GunMon
        , client          := Client
-       , backoff         := Backoff
+       , backoff         := Backoff0
        , backoff_ceiling := Ceiling
-       }) ->
+       } = StateData0) ->
   true = demonitor(GunMon, [flush]),
   gun:close(GunPid),
   Client ! {reconnecting, self()},
-  Sleep = backoff(Backoff, Ceiling) * 1000,
-  {keep_state_and_data, {state_timeout, Sleep, backoff}};
+  Backoff = backoff(Backoff0, Ceiling),
+  StateData = StateData0#{ backoff => Backoff },
+  Sleep = Backoff * 1000,
+  {keep_state, StateData, {state_timeout, Sleep, backoff}};
 down(state_timeout, backoff, StateData) ->
   {next_state, open_connection, StateData,
     {next_event, internal, init}};
@@ -485,7 +501,7 @@ push(GunConn, DeviceId, HeadersMap, Notification, Timeout) ->
 
 -spec backoff(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
 backoff(N, Ceiling) ->
-  case (math:pow(2, N) - 1) of
+  case math:pow(2, N) of
     R when R > Ceiling ->
       Ceiling;
     NextN ->
