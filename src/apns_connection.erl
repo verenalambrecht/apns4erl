@@ -378,7 +378,7 @@ handle_common( info
     {shutdown, {error, {tls_alert, {certificate_expired, _}}}} ->
     error_logger:warning_msg("Unable to establish connection ~p: shutting down",
                                  [Reason]),
-      {stop, {shutdown, Reason}}; 
+      {stop, Reason}; 
     _ ->
        {next_state, down, StateData,
     {next_event, internal, {down, StateName, Reason}}}
@@ -504,8 +504,7 @@ push(GunConn, DeviceId, HeadersMap, Notification, Timeout) ->
         {ok, Body} = gun:await_body(GunConn, StreamRef, Timeout),
         DecodedBody = jsx:decode(Body),
         {Status, ResponseHeaders, DecodedBody};
-      {error, timeout} -> timeout;
-      {error, {closed, _}} -> closed
+      {error, timeout} -> timeout
   end.
 
 -spec backoff(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
